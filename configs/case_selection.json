@@ -1,0 +1,35 @@
+[
+ {
+  "dataset": "beijing_multisite",
+  "origin_index": 30361,
+  "target": "Dingling__CO",
+  "target_position": 16,
+  "stored_smae": {
+   "OTARF": 0.2678827182749683,
+   "SOFTS": 0.35625000360156484,
+   "TimeFilter": 0.35695687991922487
+  }
+ },
+ {
+  "dataset": "kdd2018_london",
+  "origin_index": 8802,
+  "target": "KF1__PM10",
+  "target_position": 27,
+  "stored_smae": {
+   "OTARF": 1.3968269860291078,
+   "SOFTS": 1.532201992734089,
+   "TimeFilter": 1.532752491299127
+  }
+ },
+ {
+  "dataset": "shanghai_confirmation",
+  "origin_index": 47960,
+  "target": "PM_US Post",
+  "target_position": 1,
+  "stored_smae": {
+   "OTARF": 0.47619622552162283,
+   "SOFTS": 0.6458452197675605,
+   "TimeFilter": 0.6469739181562959
+  }
+ }
+]

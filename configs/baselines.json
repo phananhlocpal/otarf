@@ -1,0 +1,52 @@
+{
+  "seq_len": 96,
+  "label_len": 48,
+  "num_workers": 0,
+  "common": {
+    "train_epochs": 10,
+    "lradj": "cosine",
+    "use_amp": false
+  },
+  "model_args": {
+    "TimeFilter": {
+      "d_model": 128,
+      "d_ff": 256,
+      "e_layers": 2,
+      "n_heads": 4,
+      "patch_len": 48,
+      "dropout": 0.3,
+      "learning_rate": 0.0005,
+      "batch_size": 32,
+      "alpha": 0.1,
+      "top_p": 0.5,
+      "patience": 3
+    },
+    "SOFTS": {
+      "d_model": 512,
+      "d_core": 128,
+      "d_ff": 512,
+      "e_layers": 3,
+      "dropout": 0.0,
+      "learning_rate": 0.0003,
+      "batch_size": 16,
+      "patience": 10,
+      "save_model": true
+    },
+    "iTransformer": {
+      "d_model": 512,
+      "d_ff": 512,
+      "e_layers": 3,
+      "n_heads": 8,
+      "dropout": 0.1,
+      "learning_rate": 0.0001,
+      "batch_size": 32
+    },
+    "CRIB": {
+      "model_dim": 32,
+      "patch_len": 8,
+      "batch_size": 16,
+      "learning_rate": 0.001,
+      "loss_type": "123"
+    }
+  }
+}

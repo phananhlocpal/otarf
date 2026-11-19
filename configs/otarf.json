@@ -1,0 +1,40 @@
+{
+  "seq_len": 96,
+  "label_len": 48,
+  "train": {
+    "epochs": 10,
+    "batch_size": 16,
+    "learning_rate": 0.0005,
+    "weight_decay": 0.0,
+    "clip_grad_norm": 1.0,
+    "amp": false,
+    "objective": "observed_target_macro_mae",
+    "drop_last": false,
+    "auxiliary": "all_channel_imputed_mse",
+    "auxiliary_weight": 0.1,
+    "checkpoint": "minimum_validation_observed_target_macro_mae"
+  },
+  "architecture": {
+    "width": 64,
+    "identity_width": 8,
+    "attention_width": 32,
+    "value_width": 32,
+    "basis_width": 8,
+    "patch_length": 24,
+    "lead_group": 12,
+    "correction_scale_initial": 0.5,
+    "correction_regularization": 0.0001
+  },
+  "augmentation": {
+    "channel_fraction": 0.25,
+    "block_lengths": [
+      24,
+      96
+    ],
+    "full_blackout_anchor": "pre_context_real_anchor"
+  },
+  "peak": {
+    "quantile": 0.95,
+    "weight": 3.0
+  }
+}
