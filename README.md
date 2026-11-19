@@ -1,245 +1,278 @@
 # OTARF
 
-Code for the paper **Multivariate time series forecasting with incomplete data: an observation-anchored model for air quality monitoring networks** (model name: OTARF, Observation-gated Target-Anchored Residual Forecaster).
+### Observation-gated Target-Anchored Residual Forecaster
 
-OTARF forecasts every channel of a monitoring network from its own history, expressed relative to the
-last valid observation (the anchor) together with the observation mask and age. It then adds a signed
-correction gathered by attention from the history segments of other channels that still contain
-measurements. When no valid source exists, the output falls back to the local forecast.
+Research code for **Multivariate time series forecasting with incomplete data: an observation-anchored model for air quality monitoring networks**.
 
-This repository rebuilds the datasets, trains OTARF, its ablation variants and the four baselines
-(official SOFTS, TimeFilter, iTransformer and CRIB code, trained with the same recipe; the first three with the same
-observation information, CRIB with its authors' zero-filled input), scores outages of one target, of several targets and
-of whole stations, and regenerates every table, figure and statistical decision of the paper.
+**Loc Phan and Tham Vo** · Faculty of Information Technology, Nguyen Tat Thanh University, Vietnam
 
-## Layout
+[Architecture](#architecture) · [Results](#results) · [Getting started](#getting-started) · [Reproducing the experiments](#reproducing-the-experiments) · [Evaluation protocol](#evaluation-protocol) · [Citation](#citation)
 
-```
-otarf/                  library
-  core.py               OTARF as described in the paper, and its ablation variants
-  variants.py           variant names -> model
-  data.py               chronological windows, masks, ages, anchors
-  augmentation.py       masked-history training view
-  training.py           training recipe (observed-label MAE, masked view, checkpoint on validation nMAE)
-  evaluate.py           external evaluator (every model is scored by this file)
-  masking.py            controlled 6/24/96-hour outage of one target
-  statistics.py         paired temporal block bootstrap
-  baselines.py          wrappers around the unchanged official SOFTS / TimeFilter / iTransformer / CRIB code
-  outages.py            several targets or whole stations out at once, hourly threshold events, naive references
-  inspect.py            inference-only view of a trained OTARF: attention by source group, source knockout
-  nonorm.py             switches off the window normalization of the official baselines (mechanism test)
-  events.py             exceedance events on the 24-hour mean (PM2.5 / PM10)
-configs/                hyper-parameters used in the paper and the locked baseline commits
-scripts/                command-line entry points (see below)
-```
+OTARF forecasts air quality when monitoring sensors stop reporting for hours or days. It combines a local forecast anchored to the latest valid observation with a signed correction drawn from observed history segments of other channels. Observation masks and ages remain explicit inputs, including when the target's entire input window is missing.
 
-## Environment
+This repository provides the model, data preparation, training and evaluation code for the English v6 manuscript. Experiments cover **Beijing, London, and Shanghai**, forecast horizons of **12, 24, and 48 hours**, and comparisons with **SOFTS, TimeFilter, iTransformer, and CRIB**.
 
-Python 3.10, PyTorch 2.3.1 and one CUDA GPU. OTARF needs well under 1 GB of GPU memory; the largest
-baseline runs are TimeFilter on Beijing with mask and age variates (about 8.4 GB) and CRIB on Beijing (about 13.3 GiB).
+## Architecture
+
+![OTARF architecture: a local branch encodes anchor-relative target history, while a cross-variable branch attends to observed segments of other channels; their outputs are added to produce the forecast.](assets/otarf_overview.png)
+
+*Figure 2 of the English v6 manuscript. Gray regions indicate missing history; crossed-out segments are excluded from the source set. The small forecast curves are schematic.*
+
+The forecast is decomposed as
+
+$$
+\widehat{Z}_{i,g}
+= \underbrace{\widetilde{Z}_{i,g}}_{\text{anchor-based local forecast}}
++ \underbrace{\tanh(\gamma)\,W_o\!\sum_{(j,p)\in\mathcal{S}_i}\alpha_{i,g,j,p}\,u_{j,p}}_{\text{signed cross-variable correction}}.
+$$
+
+- **Anchor-relative history.** Each channel is represented by observed departures from its latest valid observation: $R_{s,j}=M_{s,j}(Z_{s,j}-b_j)$. The anchor may precede the 96-hour input window. Masks distinguish missing hours from observations equal to the anchor; ages enter as $\log(1+d)$.
+- **Local branch.** A shared encoder uses the target's relative history, observation status, anchor, calendar features, and channel identity to produce the base forecast.
+- **Cross-variable branch.** Other channels are divided into 24-hour segments. A query derived from the local forecast and target observation status attends only to segments containing measurements, together with a null source. Queries are formed for groups of 12 forecast hours.
+- **Fallback.** If no valid source segments remain, the correction is exactly zero and the output equals the local forecast.
+
+OTARF uses training-set standardization without per-window normalization. The paper examines why window normalization attenuates forecast variation when an imputed input window is constant, and tests that mechanism by retraining the comparison models with window normalization disabled.
+
+## Results
+
+The following values are **test nMAE at a 24-hour forecast horizon**, averaged over three seeds, from Tables 3 and 4 of the English v6 manuscript. Lower is better; bold marks the lowest error among the five models.
+
+| Network | Input history | OTARF | SOFTS | TimeFilter | iTransformer | CRIB |
+|---|---|---:|---:|---:|---:|---:|
+| Beijing | Natural | **0.426** | 0.445 | 0.430 | 0.449 | 0.443 |
+| London | Natural | **0.597** | 0.627 | 0.622 | 0.625 | 0.610 |
+| Shanghai | Natural | **0.636** | 0.686 | 0.668 | 0.685 | 0.662 |
+| Beijing | Latest 96 h of one target masked | **0.547** | 0.837 | 0.837 | 0.837 | 0.736 |
+| London | Latest 96 h of one target masked | **0.708** | 1.018 | 1.018 | 1.018 | 0.767 |
+| Shanghai | Latest 96 h of one target masked | **0.760** | 1.144 | 1.144 | 1.144 | 0.880 |
+
+Natural-history scores include all evaluable targets; masking scores include only the masked target's labels. These are different label sets, so differences between the two rows of a network are not paired estimates of degradation. Bold values indicate point estimates, not statistical significance.
+
+Across all three horizons, OTARF has the lowest natural-history error in eight of nine network–horizon pairs and meets the paper's non-inferiority criterion. It meets the superiority criterion under both 24- and 96-hour single-target masking. At the 24-hour horizon, it also has lower error in 46 of 48 comparisons against models with window normalization disabled; no comparison significantly favors those models.
+
+The findings have limits: the advantage narrows at longer horizons, most outage evidence comes from controlled masking, and attention does not meet the component-contribution criterion against uniform averaging. **OTARF-peak** improves high-concentration errors in most settings at a cost to routine forecasting; it remains a separate configuration rather than the default.
+
+## Getting started
+
+### Environment
+
+Use **Python 3.10**, **PyTorch 2.3.1**, and a CUDA GPU. The manuscript experiments used RTX 2080 Ti GPUs. Dependencies are pinned in [requirements.txt](requirements.txt).
 
 ```bash
-python3.10 -m venv .venv && source .venv/bin/activate
+git clone https://github.com/phananhlocpal/otarf.git
+cd otarf
+python3.10 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## 1. Data
+Data preparation also needs `curl`, `unzip`, and `shasum`. Shanghai is distributed inside a RAR archive; install one of `unrar`, `unar`, or `7z` before downloading. Baseline setup requires Git.
+
+At the 24-hour horizon, OTARF's measured peak allocated GPU memory is below 200 MiB. Comparison models require more memory: the Beijing runs use about 8.4 GB for TimeFilter and 13.3 GiB for CRIB. These are model allocation measurements, not total GPU capacity requirements.
+
+### Data
 
 ```bash
-bash scripts/download_data.sh             # Beijing (UCI 501), London (KDD Cup 2018, Monash), Shanghai (UCI 394)
-python scripts/prepare_data.py            # writes data/processed/<dataset>/
+bash scripts/download_data.sh
+python scripts/prepare_data.py
 ```
 
-The Shanghai file sits inside a RAR archive in the UCI download; the script extracts it with `unrar`,
-`unar` or `7z`. Preparation is deterministic. The processed files should have these SHA-256 values:
+| Network | Dataset identifier | Hours | Input channels | Pollutant targets | Evaluable test targets |
+|---|---|---:|---:|---:|---:|
+| Beijing | `beijing_multisite` | 35,064 | 156 | 72 | 72 |
+| London | `kdd2018_london` | 10,920 | 59 | 59 | 52 |
+| Shanghai | `shanghai_confirmation` | 52,584 | 15 | 3 | 3 |
 
-| File | SHA-256 |
+Sources: [Beijing Multi-Site, UCI 501](https://archive.ics.uci.edu/dataset/501/beijing+multi+site+air+quality+data), [KDD Cup 2018 with missing values, Monash deposit](https://doi.org/10.5281/zenodo.4656719), and the Shanghai subset of [PM2.5 Data of Five Chinese Cities, UCI 394](https://archive.ics.uci.edu/dataset/394/pm2+5+data+of+five+chinese+cities).
+
+Preparation writes `data/processed/<dataset>/data.csv`, `observations.npz`, and `metadata.json`. The CSV contains causally forward-filled inputs; the NPZ preserves original measurements and observation masks for observed-label losses and metrics. Leading gaps use training-set medians. Channels are retained using training coverage of at least 20% and nonzero training variance.
+
+<details>
+<summary>Processed-data SHA-256 checksums</summary>
+
+| File under `data/processed/` | SHA-256 |
 |---|---|
-| beijing_multisite/data.csv | `0bd9ec2540fc95d28613ca6da7ce1c00c538fc42abe116f71c169ba22023afb8` |
-| beijing_multisite/observations.npz | `6df743f66412610d200751e31008207faed8f8829bd88b94d7534de77288dad5` |
-| kdd2018_london/data.csv | `4d9c5b37a9cb9df3f0c62710349577d4d81bad4a4ad156a65a6bc8c0bf1c239d` |
-| kdd2018_london/observations.npz | `07312b9749c4534102e879653fef2ea9f8668fd22f81f18eae142405a9c06f72` |
-| shanghai_confirmation/data.csv | `e54c5dbf99d77a74d8e529268516dceaa4d774028d8503e7dd75a536a49343b7` |
-| shanghai_confirmation/observations.npz | `1fa3ec9b791f446e17ec4d685dceea67b1b58a5992f3c7ff197aece513a47d0a` |
+| `beijing_multisite/data.csv` | `0bd9ec2540fc95d28613ca6da7ce1c00c538fc42abe116f71c169ba22023afb8` |
+| `beijing_multisite/observations.npz` | `6df743f66412610d200751e31008207faed8f8829bd88b94d7534de77288dad5` |
+| `kdd2018_london/data.csv` | `4d9c5b37a9cb9df3f0c62710349577d4d81bad4a4ad156a65a6bc8c0bf1c239d` |
+| `kdd2018_london/observations.npz` | `07312b9749c4534102e879653fef2ea9f8668fd22f81f18eae142405a9c06f72` |
+| `shanghai_confirmation/data.csv` | `e54c5dbf99d77a74d8e529268516dceaa4d774028d8503e7dd75a536a49343b7` |
+| `shanghai_confirmation/observations.npz` | `1fa3ec9b791f446e17ec4d685dceea67b1b58a5992f3c7ff197aece513a47d0a` |
 
-`data.csv` holds the forward-filled series used as model input; `observations.npz` keeps the original
-values and the observation mask, which are used for the loss and for every metric.
+</details>
 
-## 2. Baselines
+### Train and evaluate OTARF
 
-```bash
-bash scripts/fetch_baselines.sh           # clones SOFTS, TimeFilter, iTransformer and CRIB into external/ at the locked commits
-```
-
-The baseline model code is never modified. Before each run the SHA-256 of every Python file of
-SOFTS, TimeFilter, iTransformer and CRIB is checked against `configs/baselines.lock.json`.
-
-## 3. Training and evaluation
-
-One command trains one model on one dataset, horizon and seed, evaluates the best and last checkpoints on
-validation and test, and scores the controlled 6, 24 and 96-hour outage of one target.
+Run commands from the repository root:
 
 ```bash
-# OTARF and its variants
 python scripts/train_otarf.py --dataset beijing_multisite --horizon 24 --seed 2021
-python scripts/train_otarf.py --dataset beijing_multisite --horizon 24 --seed 2021 --variant no_cross
-
-# Baselines as compared in the paper: official model code, OTARF training recipe, mask and log(1+age) variates
-python scripts/train_baseline.py --model TimeFilter --recipe indicator --dataset kdd2018_london --horizon 24 --seed 2021
-
-# Baselines with their own official trainers (optional; not used in the paper)
-python scripts/train_baseline.py --model SOFTS --recipe official --dataset shanghai_confirmation --horizon 24 --seed 2021
 ```
 
-Datasets: `beijing_multisite`, `kdd2018_london`, `shanghai_confirmation`. Horizons: 12, 24, 48. Seeds: 2021, 2022, 2023.
+Each run trains for 10 epochs, selects the checkpoint with the lowest validation nMAE on natural histories, evaluates best and last checkpoints on validation and test, and evaluates single-target masking of 6, 24, and 96 hours.
 
-Variants (`--variant`):
+Artifacts are written to `runs/OTARF-otarf/beijing_multisite/h24/s2021/`, including run metadata, learning curves, checkpoints, `result.json`, natural-history metrics and per-origin errors in `best/` and `last/`, and controlled-masking outputs in `masked/`.
 
-| Name | Meaning |
-|---|---|
-| `otarf` | OTARF as in the paper (default) |
-| `no_anchor` | history given as the filled standardized series; anchor removed from the base forecast and from all features |
-| `no_cross` | cross-variable correction set to zero |
-| `mean_pool` | attention replaced by a uniform mean over the same valid source segments |
-| `state_blind` | mask, age and anchor validity replaced by constants at the input |
-| `state_blind_no_aug` | as `state_blind`, trained on natural histories only |
+## Reproducing the experiments
 
-Each run writes to `runs/<model>-<variant or recipe>/<dataset>/h<H>/s<seed>/`: `result.json`,
-`learning_curve.json`, checkpoints, `best/` and `last/` metrics and per-origin errors, and `masked/`.
+### Comparison models
 
-iTransformer, CRIB and the peak-weighted OTARF (H = 12, 24 and 48, same seeds) are trained with:
+Fetch the official implementations at the locked commits:
 
 ```bash
+bash scripts/fetch_baselines.sh
+```
+
+The lock file [configs/baselines.lock.json](configs/baselines.lock.json) records commits and Python-file hashes, which are checked before training. The primary comparisons use official model implementations with the paper's common training recipe, rather than each model's original training pipeline.
+
+| Models | Observation information | Training entry point |
+|---|---|---|
+| SOFTS, TimeFilter | Forward-filled values, mask and log-age as extra variates | `train_baseline.py --recipe indicator` |
+| iTransformer | Forward-filled values, mask and log-age as extra variates | `train_extended_baseline.py` |
+| CRIB | Authors' mask-multiplied, zero-filled input; no age variates | `train_extended_baseline.py` |
+
+All four use observed-label MAE plus the auxiliary imputed-channel MSE, masking augmentation, and validation-nMAE checkpoint selection. They retain their configured architecture, learning rate, and batch size; TimeFilter and CRIB additionally retain their official auxiliary losses. CRIB uses the study's 96-hour input window instead of the authors' 24-hour window. Calendar-feature inputs differ as documented in manuscript Table 2.
+
+```bash
+python scripts/train_baseline.py --model TimeFilter --recipe indicator --dataset kdd2018_london --horizon 24 --seed 2021
 python scripts/train_extended_baseline.py --model iTransformer --dataset beijing_multisite --horizon 24 --seed 2021
 python scripts/train_extended_baseline.py --model CRIB --dataset kdd2018_london --horizon 24 --seed 2021
+
+# Mechanism test: retrain with window normalization disabled (H = 24).
+python scripts/train_extended_baseline.py --model TimeFilter --dataset kdd2018_london --horizon 24 --seed 2021 --no-window-norm
+```
+
+The normalization intervention uses the official `use_norm=0` flag for SOFTS and iTransformer and replaces the normalization module with an identity for TimeFilter and CRIB; see [otarf/nonorm.py](otarf/nonorm.py). This intervention is separate from the primary comparisons. One CRIB run without normalization (Beijing, seed 2022) diverged at epoch 6; its reported results use two seeds.
+
+Optional original-trainer runs for SOFTS and TimeFilter use `--recipe official` and are not the comparisons reported in the manuscript.
+
+### Ablations and peak-weighted training
+
+```bash
+python scripts/train_otarf.py --dataset beijing_multisite --horizon 24 --seed 2021 --variant no_cross
 python scripts/train_otarf.py --dataset beijing_multisite --horizon 24 --seed 2021 --peak
 ```
 
-iTransformer receives the mask and log(1+age) of every channel as extra variates. CRIB keeps its authors' input (the
-series multiplied by the mask, no age) because its attention runs jointly over all patch x variate tokens, and uses a
-96-hour window instead of the authors' 24 hours. `--peak` multiplies the error of observed labels at or above the train
-95th percentile of their target by 3 (`configs/otarf.json`, key `peak`).
-
-To launch every run behind the paper (153 training runs plus inference; sections can be selected):
-
-```bash
-bash scripts/reproduce_all.sh                          # otarf baselines ablation inspect extended outages nonorm events24 (add "official" for the optional runs)
-bash scripts/reproduce_all.sh otarf baselines ablation # the runs behind the result tables only
-```
-
-## 4. Tables, figures and decisions
-
-```bash
-python scripts/inspect_otarf.py --dataset beijing_multisite   # inference only; repeat for each dataset
-python scripts/summarize.py        # results/*.csv and results/decisions.json (bootstrap: about 5 minutes)
-python scripts/make_figures.py     # results/figures/ (Figures 1, 3 and 4)
-python scripts/draw_overview.py    # schematic of the model (Figure 2)
-```
-
-| Paper | Output |
+| `--variant` | Change from full OTARF |
 |---|---|
-| Figure 1: outage lengths in the three datasets | `figures/gap_lengths` (from `data/processed`) |
-| Figure 2: schematic of the model | `scripts/draw_overview.py` |
-| Natural histories, mean ± SD | `results/table_natural.csv` |
-| Natural histories by the target's own history state | `results/table_history_state.csv` |
-| 24 h and 96 h outages with the last-value reference; Figure 3 | `results/table_masked.csv`, `figures/masking_curves` |
-| Ablation table (OTARF lower than each variant, %, validation) | `results/table_ablation_paper.csv` (test sMAE: `results/table_ablation.csv`) |
-| Labels above the train 95th percentile, rising and stable labels | `results/table_tail.csv`, `results/table_ramp_stable.csv` |
-| MAE in concentration units, H = 24 (and above / below the 95th percentile) | `results/table_raw_h24.csv`, `results/table_pollutant_tail_h24.csv` |
-| Cost at H = 24 | `results/table_cost_h24.csv` |
-| Anchor age under the 96-hour outage | `results/table_anchor_age96.csv` |
-| Where the cross-variable branch takes its information from (attention by source group, knockout) | `results/table_sources.csv` (after `scripts/inspect_otarf.py`) |
-| Figure 4: 96-hour case study (origins chosen by `scripts/select_cases.py`, shipped in `configs/case_selection.json`) | `figures/case_96h` (after `scripts/inspect_otarf.py`) |
-| Paired temporal block bootstrap | `results/comparison.csv`, `results/ablation_comparison.csv`, `results/bootstrap_*.csv` |
-| Pre-specified decision rules | `results/decisions.json` |
+| `otarf` | Full model; default |
+| `no_cross` | Remove the cross-variable correction |
+| `no_anchor` | Use filled standardized history; remove the anchor from the forecast baseline and features |
+| `state_blind` | Replace masks, ages, and anchor validity with constants, including in source selection |
+| `state_blind_no_aug` | Remove observation status and masked-history augmentation |
+| `mean_pool` | Replace attention with uniform averaging over the same valid sources |
 
-`summarize.py` was checked on the stored arrays of the paper's runs: all 717 table and analysis cells, the 153 source-analysis cells, the case selection,
-144 comparison rows, 90 ablation rows and every decision match the paper.
+Ablations use H = 24 and all three seeds; component decisions use validation results. `--peak` uses the full architecture and triples the forecasting-error weight for observed labels at or above each target's training-set 95th percentile.
 
-### Extended comparison: outages of several channels, threshold events, naive references
+### Experiment orchestration
+
+The study uses datasets listed above, horizons `12 24 48`, and seeds `2021 2022 2023`.
 
 ```bash
-python scripts/evaluate_outages.py --model OTARF --dataset beijing_multisite --seed 2021   # inference only, needs the finished run
-python scripts/evaluate_outages.py --model persistence --dataset beijing_multisite --horizon 12
-python scripts/summarize_extensions.py        # results/extensions/*.csv and *_decision.json
+# All training and inference sections, followed by summaries and available figure exports.
+bash scripts/reproduce_all.sh
+
+# Select sections; the script still attempts the summary and figure-export stage.
+bash scripts/reproduce_all.sh otarf baselines ablation
 ```
 
-| Paper | Output |
+| Section | Scope |
 |---|---|
-| iTransformer and CRIB against OTARF (H = 24, natural and 6/24/96 h outage) and the pre-specified rule | `results/extensions/A_new_baselines.csv`, `A_decision.json` |
-| Peak-weighted loss against OTARF (validation rule, test as secondary) | `results/extensions/C_peak_vs_otarf.csv`, `C_decision.json` |
-| One target, 25/50% of the targets, 25/50% of the stations out for 24 or 96 h | `results/extensions/B_multi_outage.csv`, `B_decision.json` |
-| Hourly threshold events (precision, recall, F1) | `results/extensions/E4_events.csv` |
-| Persistence and seasonal naive references | `results/extensions/E0_naive.csv` |
-| sMAE by the length of the real outage at the end of the history | `results/extensions/E1_real_gaps.csv` |
+| `otarf` | Full OTARF, all horizons |
+| `baselines` | SOFTS and TimeFilter with observation indicators, all horizons |
+| `ablation` | Five OTARF variants, H = 24 |
+| `inspect` | Source attention, source knockout, and case-study inference |
+| `extended` | iTransformer, CRIB, and OTARF-peak, all horizons |
+| `outages` | Multiple-target/station masking, naive references, and hourly-event diagnostics |
+| `nonorm` | Four comparison models without window normalization, H = 24 |
+| `events24` | Events based on 24-hour means, H = 24 |
+| `official` | Optional original-trainer runs; excluded from the default command |
 
-Thresholds for the event analysis are applied to hourly values and are not the official AQI: PM2.5 75 and PM10 150
-ug/m3 (grade II 24-hour limits of the Chinese national standard GB 3095-2012) for Beijing and Shanghai; the first value
-of the 'Moderate' and 'High' bands of the UK Daily Air Quality Index (PM2.5 36 and 54, PM10 51 and 76 ug/m3) for London.
-In a station-wise outage every channel of the chosen stations (pollutants and meteorology) is removed; Shanghai has no
-station structure and only has the target-wise scenarios.
+The launcher skips training directories containing `result.json`. It does not resume optimizer state or verify that an existing result matches a changed configuration; use a fresh run directory when changing settings. Inference sections need the corresponding trained checkpoints. Partial runs may produce partial summaries or leave figure exports without their required inputs.
 
-The extension code was checked against the stored arrays of the paper's runs: the outage scenarios of `otarf/outages.py`
-reproduce the per-origin arrays of the persistence and seasonal references for every scenario of London and Shanghai; the
-iTransformer, CRIB and peak-weighted OTARF models built by this code load the trained checkpoints strictly and reproduce
-the stored test sMAE (London, seed 2021, natural history and 96-hour outage); and the peak thresholds equal the ones
-saved by the original runs. Training itself uses the unchanged `fit` of `otarf/training.py`.
+### Analysis outputs and manuscript mapping
 
-### Final comparison: five models, window normalization switched off, 24-hour-mean events
+After the required training and inference runs are available:
 
 ```bash
-# The four comparison models with their window normalization switched off (H = 24): SOFTS and iTransformer through the
-# official flag use_norm=0, TimeFilter and CRIB by replacing their normalization module with an identity (otarf/nonorm.py).
-python scripts/train_extended_baseline.py --model TimeFilter --dataset kdd2018_london --horizon 24 --seed 2021 --no-window-norm
-# Exceedance events on the 24-hour mean (inference only, H = 24 runs must be finished)
-python scripts/evaluate_events24.py --model OTARF --dataset beijing_multisite --seed 2021
-python scripts/summarize_v6.py      # results/v6/*.csv and all_horizons_decision.json
+python scripts/summarize.py
+python scripts/summarize_extensions.py
+python scripts/summarize_v6.py
+python scripts/make_figures.py
 ```
 
-| Paper | Output |
+Paths below are relative to `results/`. The `v6/` outputs contain the final five-model comparisons; the top-level summary tables also support earlier comparisons and component analyses.
+
+| English v6 manuscript | Output or source |
 |---|---|
-| Tables 3 and 4: natural history and 6/24/96 h outage, five models, H = 12/24/48, with the decision rule | `results/v6/all_horizons.csv`, `all_horizons_bootstrap.csv`, `all_horizons_decision.json` |
-| Table 5, upper panel: window normalization on and off (H = 24) | `results/v6/all_horizons.csv` and `results/v6/nonorm_vs_otarf.csv` |
-| Table 5, lower panel: PM2.5 MAE in ug/m3 | `results/v6/pm25_ugm3.csv` |
-| Table 6: real outages at the end of the history | `results/extensions/E1_real_gaps.csv` |
-| Table 9: high-concentration, rapid-increase and stable labels with OTARF-peak | `results/v6/label_groups.csv` |
-| Figure 5: F1 of exceedance of the 24-hour-mean threshold | `results/v6/events24.csv` |
+| Tables 3–4: natural histories and single-target masking, all horizons | `v6/all_horizons.csv`, `v6/all_horizons_bootstrap.csv`, `v6/all_horizons_decision.json` |
+| Table 5: normalization intervention and PM2.5 error in concentration units | `v6/nonorm_vs_otarf.csv`, `v6/pm25_ugm3.csv` |
+| Table 6: real trailing outages | `extensions/E1_real_gaps.csv` |
+| Table 7: component contributions | `table_ablation_paper.csv`; validation decisions in `decisions.json` |
+| Table 8: source-group knockout | `table_sources.csv`, after `inspect_otarf.py` |
+| Table 9: high-concentration, rapid-increase, and stable labels | `v6/label_groups.csv` |
+| Table 10: parameters and computational cost | `table_cost_h24.csv` |
+| Figure 1: outage lengths | `figures/gap_lengths.pdf` and `.png` |
+| Figure 2: architecture | README preview: `assets/otarf_overview.png` (repository-root path) |
+| Figure 3: 96-hour case study | `figures/case_96h.pdf` and `.png`, after `inspect_otarf.py` |
+| Figure 4: simultaneous outages | Plotting data: `extensions/B_multi_outage.csv` |
+| Figure 5: 24-hour-mean event F1 | Plotting data: `v6/events24.csv` |
 
-Daily events: a 24-hour interval is scored when at least 20 of its hours are observed (Beijing, Shanghai) or 18
-(London); thresholds are PM2.5 75 ug/m3 (Grade II 24-hour limit of GB 3095-2012) for Beijing and Shanghai and 36 ug/m3
-(start of the UK DAQI "Moderate" band) for London. In the paper one CRIB run without normalization (Beijing, seed 2022)
-diverged at epoch 6 (non-finite gradient); `summarize_v6.py` accepts two seeds for the runs without normalization.
+`make_figures.py` exports gap lengths, masking curves, and the case study. The architecture preview above is rendered directly from the English v6 manuscript PDF; `draw_overview.py` exports the earlier Vietnamese-label schematic. The included scripts produce the numerical data for Figures 4 and 5; their final manuscript layouts are not exported by `make_figures.py`.
 
-`summarize_v6.py` and `otarf/events.py` were checked against the stored arrays of the paper's runs: the decision
-counts, the comparison against the models without normalization (46 of 48 favourable), the PM2.5 errors in ug/m3 and
-the event F1 values reproduce the paper (bootstrap counts can differ by one cell with fewer resamples); the daily means
-of `otarf/events.py` match the stored arrays exactly (Shanghai, natural and 96-hour outage). A CRIB model built with
-`window_norm=False` loads the trained checkpoint of the paper strictly and reproduces its stored errors (London, seed 2021,
-96-hour outage).
+## Evaluation protocol
 
-## Evaluation protocol in brief
+- **Temporal split:** chronological 70/10/20% train/validation/test; 96-hour histories; no forecast targets cross split boundaries. Normalization uses training statistics only, and future meteorological observations are excluded.
+- **Training:** 10 epochs; natural and masked history copies per batch. Each channel in the masked copy is selected with probability 0.25 for a trailing 24- or 96-hour interruption. Values, masks, ages, and anchors are reconstructed consistently. OTARF adds a squared-correction penalty of $10^{-4}$.
+- **Primary metric:** nMAE is observed-label MAE divided by each target's training standard deviation, averaged equally over targets with labels in the scored split. Older output fields call this `sMAE`.
+- **Controlled single-target masking:** a fixed SHA-256 rule selects one target per origin. Its last 6, 24, or 96 hours are replaced with the last valid pre-gap value, and only that target's observed future labels are scored. Persistence uses the same pre-gap value and labels.
+- **Simultaneous masking:** at H = 24, interrupt 25% or 50% of targets, or all channels at 25% or 50% of stations, for 24 or 96 hours. Station scenarios apply to Beijing and London; Shanghai has only target-wise scenarios.
+- **Uncertainty:** paired moving-block bootstrap on seed-averaged per-origin errors, block lengths H and 168 hours, and 20,000 resamples. Bonferroni families contain 36 comparisons per primary scenario, 12 per normalization-intervention scenario, and 15 for ablations. Significance requires an interval excluding zero at both block lengths. This estimates temporal uncertainty, separately from training-seed variation.
+- **Primary decision rule:** superiority requires all 36 comparisons to favor OTARF, with at least 28 significant. Non-inferiority requires no comparison to be worse by more than 1%. Component and peak-variant decisions use validation data under the manuscript's specified criteria.
 
-* Chronological 70/10/20 % split; normalisation fitted on train only; input window 96 hours.
-* nMAE (normalized MAE; called sMAE in older output files): MAE divided by the train SD of each target, on observed labels only, averaged uniformly over
-  targets that have at least one label in the scored split.
-* Controlled outage: at each origin one target is chosen by a fixed SHA-256 rule; its last 6, 24 or
-  96 hours are replaced by the last valid value before the gap; only that target's labels are scored.
-  The natural (0-hour) score uses all targets, so it is a different label set. The last-value reference
-  repeats the value before the gap on the same labels.
-* Bootstrap: paired moving blocks of H and 168 hours on seed-mean per-origin errors, 20 000 resamples,
-  Bonferroni within each family (36 comparisons per scenario against the four baselines, 12 against the models without
-  window normalization, 15 for the ablations).
-  It describes temporal uncertainty of the paired difference, not variation across training runs.
+For Figure 5, PM2.5 events use the mean over the next 24 forecast hours. At least 20 observed hours are required in Beijing and Shanghai, or 18 in London. The historical-data thresholds are 75 µg/m³ in Beijing and Shanghai (GB 3095-2012) and 36 µg/m³ in London (the lower boundary of the UK DAQI Moderate band). The separate hourly-event diagnostics in `extensions/E4_events.csv` are not the daily-mean analysis in Figure 5.
 
-## Reproducibility notes
+Seeds, deterministic cuDNN settings, and `torch.use_deterministic_algorithms(True, warn_only=True)` are set for each run. TimeFilter uses a CUDA operation without a deterministic kernel; exact numerical agreement across executions and GPU models is not guaranteed.
 
-* Seeds, deterministic cuDNN and `torch.use_deterministic_algorithms(True, warn_only=True)` are set for
-  every run. TimeFilter's official gate uses a CUDA operation without a deterministic kernel, so its
-  runs can differ slightly between executions. Results can also differ slightly across GPU models.
-* OTARF and the baselines use the same objective, masked-history augmentation and checkpoint rule; the
-  baselines keep their official architecture, learning rate and batch size.
+## Repository structure
 
-## Data licences
+```text
+assets/                 Architecture preview from the English manuscript
+configs/                Model settings, baseline source locks, fixed case selection
+otarf/
+  core.py               OTARF architecture and component switches
+  data.py               Chronological windows, observation status, and anchors
+  augmentation.py       Masked-history training views
+  training.py           Shared training recipe and checkpoint selection
+  baselines.py          Wrappers for official comparison models
+  nonorm.py             Window-normalization intervention
+  evaluate.py           Shared observed-label evaluator
+  masking.py            Controlled single-target masking
+  outages.py            Simultaneous outages and naive references
+  events.py             Events on 24-hour means
+  inspect.py            Source attention and knockout inference
+  statistics.py         Paired temporal block bootstrap
+scripts/                Data, training, evaluation, and analysis entry points
+requirements.txt        Pinned Python dependencies
+```
 
-Beijing Multi-Site and PM2.5 Data of Five Chinese Cities: CC BY 4.0 (UCI Machine Learning Repository).
-KDD Cup 2018 with missing values: see the Zenodo record 10.5281/zenodo.4656719 and the original competition terms.
+Downloaded datasets (`data/`), baseline clones (`external/`), trained artifacts (`runs/`), and generated analyses (`results/`) are created locally and excluded from version control.
+
+## Citation
+
+If you use this code, please cite the accompanying manuscript. The entry below describes the manuscript; publication metadata should be added when available.
+
+```bibtex
+@unpublished{phan_otarf_2026,
+  title  = {Multivariate time series forecasting with incomplete data:
+            an observation-anchored model for air quality monitoring networks},
+  author = {Phan, Loc and Vo, Tham},
+  year   = {2026},
+  note   = {Manuscript},
+  url    = {https://github.com/phananhlocpal/otarf}
+}
+```
+
+## Data and third-party licences
+
+Beijing Multi-Site and PM2.5 Data of Five Chinese Cities are distributed under CC BY 4.0 by UCI. For KDD Cup 2018, consult the Monash deposit and original competition terms. Baseline implementations retain their upstream licences; see the repositories recorded in [configs/baselines.lock.json](configs/baselines.lock.json).
